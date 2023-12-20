@@ -10,64 +10,86 @@ ffi.cdef[[
     int waitpid(pid_t pid, int *status, int options);
 ]]
 
-local function createPipe()
+local luapiper = {}
+
+function luapiper.Pipe()
     local pipe_fd = ffi.new("int[2]")
     if ffi.C.pipe(pipe_fd) == -1 then
-        error("Erro ao criar a pipe")
+        error("couldn't create a pipe")
     end
-    return pipe_fd
+
+    local closePipe = function()
+        ffi.C.close(pipe_fd[0])
+        ffi.C.close(pipe_fd[1])
+    end
+
+    return pipe_fd, closePipe
 end
 
-local function createChildProcess(pipe_fd)
-    local pid = ffi.C.fork()
+function luapiper.PipeSession()
+    local child = {}
+    local pipe_fd, closePipe = luapiper.Pipe()
 
-    if pid == -1 then
-        error("Erro ao criar o processo filho")
-    elseif pid == 0 then
-        -- Código do processo filho
-        ffi.C.close(pipe_fd[1])  -- Fechar a extremidade de escrita da pipe no processo filho
+    child.id = ffi.C.fork()
+    child.pipe = pipe_fd
+
+    if child.id == -1 then
+        error("could not create child process")
+    elseif child.id == 0 then
+        -- Child process code
+        ffi.C.close(child.pipe[1])  -- Close the write end of the pipe in the child process
 
         while true do
             local buffer_size = 1024
             local buffer = ffi.new("char[?]", buffer_size)
-            local bytes_read = ffi.C.read(pipe_fd[0], buffer, buffer_size)
+            local bytes_read = ffi.C.read(child.pipe[0], buffer, buffer_size)
 
             if bytes_read <= 0 then
                 break
             end
 
             local command = ffi.string(buffer, bytes_read)
-            print("Processo filho executando:", command)
             os.execute(command)
         end
 
-        ffi.C.close(pipe_fd[0])  -- Fechar a extremidade de leitura da pipe no processo filho
+        ffi.C.close(child.pipe[0])  -- Close the read end of the pipe in the child process
         os.exit(0)
     else
-        -- Código do processo pai
-        ffi.C.close(pipe_fd[0])  -- Fechar a extremidade de leitura da pipe no processo pai
-        return pid
+        -- Parent process code
+        ffi.C.close(child.pipe[0])  -- Close the read end of the pipe in the parent process
+        child.close = function()
+            closePipe()
+            ffi.C.waitpid(child.id, nil, 0)
+        end
+
+        child.send = function(child, message)
+            print("Sending message:", message)
+            local msg_ptr = ffi.cast("const void*", message)  -- Convert string to pointer
+            ffi.C.write(child.pipe[1], msg_ptr, #message + 1)
+        end
+        
+
+        return child
     end
 end
 
-local function main()
-    local pipe_fd = createPipe()
-    local child_pid = createChildProcess(pipe_fd)
+local function example()
+    local child = luapiper.PipeSession()
 
     while true do
-        io.write("Digite o comando (ou 'exit' para sair): ")
+        --io.write("shell> ")
         local command = io.read()
 
         if command == "exit" then
             break
         end
 
-        ffi.C.write(pipe_fd[1], command, #command + 1)
+        child:send(command)
     end
 
-    ffi.C.close(pipe_fd[1])  -- Fechar a extremidade de escrita da pipe no processo pai
-    ffi.C.waitpid(child_pid, nil, 0)
+    child:close()
 end
 
-main()
+--example()
 
+return luapiper;
