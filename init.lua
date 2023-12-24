@@ -8,6 +8,8 @@ ffi.cdef[[
     ssize_t read(int fd, void *buf, size_t count);
     int close(int fd);
     int waitpid(pid_t pid, int *status, int options);
+    int dup2(int oldfd, int newfd);
+    int execvp(const char *file, char *const argv[]);
 ]]
 
 local luapiper = {}
@@ -26,7 +28,7 @@ function luapiper.Pipe()
     return pipe_fd, closePipe
 end
 
-function luapiper.PipeSession()
+function luapiper.PipeSession(program, args)
     local child = {}
     local pipe_fd, closePipe = luapiper.Pipe()
 
@@ -39,21 +41,25 @@ function luapiper.PipeSession()
         -- Child process code
         ffi.C.close(child.pipe[1])  -- Close the write end of the pipe in the child process
 
-        while true do
-            local buffer_size = 1024
-            local buffer = ffi.new("char[?]", buffer_size)
-            local bytes_read = ffi.C.read(child.pipe[0], buffer, buffer_size)
+        -- Redirect STDIN to the read end of the pipe
+        ffi.C.dup2(child.pipe[0], 0)
+        ffi.C.close(child.pipe[0])
 
-            if bytes_read <= 0 then
-                break
-            end
-
-            local command = ffi.string(buffer, bytes_read)
-            os.execute(command)
+        -- Convert Lua table of arguments to a C array
+        local argv = ffi.new("char *[?]", #args + 2)
+        argv[0] = ffi.new("char[?]", #program + 1)
+        ffi.copy(argv[0], program)
+        for i, arg in ipairs(args) do
+            argv[i] = ffi.new("char[?]", #arg + 1)
+            ffi.copy(argv[i], arg)
         end
+        argv[#args + 1] = nil  -- Null-terminate the array
 
-        ffi.C.close(child.pipe[0])  -- Close the read end of the pipe in the child process
-        os.exit(0)
+        -- Execute the specified program with arguments
+        ffi.C.execvp(program, argv)
+
+        -- If execvp fails
+        error("execvp failed")
     else
         -- Parent process code
         ffi.C.close(child.pipe[0])  -- Close the read end of the pipe in the parent process
@@ -67,29 +73,28 @@ function luapiper.PipeSession()
             local msg_ptr = ffi.cast("const void*", message)  -- Convert string to pointer
             ffi.C.write(child.pipe[1], msg_ptr, #message + 1)
         end
-        
 
         return child
     end
 end
 
 local function example()
-    local child = luapiper.PipeSession()
+    local program = "pixilang"
+    local args = { "./src/entrypoint.pixi" }
+
+    local child = luapiper.PipeSession(program, args)
 
     while true do
-        --io.write("shell> ")
-        local command = io.read()
+        --local command = io.read()
 
-        if command == "exit" then
-            break
-        end
-
-        child:send(command)
+        child:send("clear #WHITE;frame 0")
     end
 
     child:close()
 end
 
+-- Uncomment the line below to run the example
 --example()
 
-return luapiper;
+return luapiper
+
